@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Security & Privacy Analysis</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+        input[type="text"], textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+        textarea {
+            height: 100px;
+            resize: vertical;
+        }
+        .required {
+            color: red;
+        }
+        .submit-btn {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 30px;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            display: block;
+            margin: 20px auto;
+        }
+        .submit-btn:hover {
+            background-color: #0056b3;
+        }
+        .submit-btn:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .error {
+            color: red;
+            margin-bottom: 20px;
+            padding: 10px;
+            background-color: #ffebee;
+            border-radius: 5px;
+        }
+        .loading {
+            text-align: center;
+            color: #007bff;
+            font-style: italic;
+            margin: 20px 0;
+        }
+        .results {
+            margin-top: 30px;
+            padding: 20px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+        }
+        .result-section {
+            margin-bottom: 25px;
+            padding: 15px;
+            background-color: white;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+        }
+        .result-section h3 {
+            margin-top: 0;
+            color: #007bff;
+        }
+        .result-content {
+            line-height: 1.6;
+            margin-top: 10px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .timestamp {
+            font-size: 12px;
+            color: #6c757d;
+            text-align: right;
+            margin-top: 20px;
+        }
+        .hidden {
+            display: none;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #007bff;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>AI Security & Privacy Analysis</h1>
+        
+        <div id="errorMessage" class="error hidden"></div>
+        
+        <form id="analysisForm">
+            <div class="form-group">
+                <label for="company">Company <span class="required">*</span></label>
+                <input type="text" id="company" name="company" required 
+                       placeholder="e.g., Google, Microsoft, OpenAI">
+            </div>
+            
+            <div class="form-group">
+                <label for="algorithm">Algorithm <span class="required">*</span></label>
+                <input type="text" id="algorithm" name="algorithm" required 
+                       placeholder="e.g., GPT-4, BERT, recommendation system">
+            </div>
+            
+            <div class="form-group">
+                <label for="year_range">Year Range <span class="required">*</span></label>
+                <input type="text" id="year_range" name="year_range" required 
+                       placeholder="e.g., 2020-2023, 2022">
+            </div>
+            
+            <div class="form-group">
+                <label for="description">Algorithm Description (Optional)</label>
+                <textarea id="description" name="description" 
+                          placeholder="Provide additional details about the algorithm..."></textarea>
+            </div>
+            
+            <button type="submit" id="submitBtn" class="submit-btn">Submit Analysis</button>
+        </form>
+        
+        <div id="loading" class="loading hidden">
+            <div class="spinner"></div>
+            <p>Analyzing... This may take a moment.</p>
+        </div>
+        
+        <div id="results" class="results hidden">
+            <h2>Analysis Results</h2>
+            <p><strong>Company:</strong> <span id="resultCompany"></span></p>
+            <p><strong>Algorithm:</strong> <span id="resultAlgorithm"></span></p>
+            <p><strong>Year Range:</strong> <span id="resultYearRange"></span></p>
+            
+            <div class="result-section">
+                <h3>Cybersecurity Analysis</h3>
+                <div class="result-content" id="cybersecContent"></div>
+            </div>
+            
+            <div class="result-section">
+                <h3>Privacy Analysis</h3>
+                <div class="result-content" id="privacyContent"></div>
+            </div>
+            
+            <div class="timestamp">
+                Analysis completed on: <span id="timestamp"></span>
+            </div>
+        </div>
+    </div>
+
+
+    <script>
+        document.getElementById('analysisForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            document.getElementById('errorMessage').classList.add('hidden');
+            document.getElementById('results').classList.add('hidden');
+            
+            document.getElementById('loading').classList.remove('hidden');
+            document.getElementById('submitBtn').disabled = true;
+            document.getElementById('submitBtn').textContent = 'Analyzing...';
+            
+            const formData = {
+                company: document.getElementById('company').value.trim(),
+                algorithm: document.getElementById('algorithm').value.trim(),
+                year_range: document.getElementById('year_range').value.trim(),
+                description: document.getElementById('description').value.trim()
+            };
+            
+            try {
+                const response = await fetch('http://127.0.0.1:5000/analyze', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(formData)
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    displayResults(data);
+                } else {
+                    displayError(data.error || 'An unknown error occurred');
+                }
+            } catch (error) {
+                console.error('Fetch error:', error);
+                displayError('Network error: Unable to connect to the server. Make sure the backend is running on http://127.0.0.1:5000');
+            } finally {
+                document.getElementById('loading').classList.add('hidden');
+                document.getElementById('submitBtn').disabled = false;
+                document.getElementById('submitBtn').textContent = 'Submit Analysis';
+            }
+        });
+        
+        function displayResults(data) {
+            document.getElementById('resultCompany').textContent = data.company;
+            document.getElementById('resultAlgorithm').textContent = data.algorithm;
+            document.getElementById('resultYearRange').textContent = data.year_range;
+            
+            // Display raw responses
+            document.getElementById('cybersecContent').textContent = data.cybersecurity || 'No cybersecurity analysis available';
+            document.getElementById('privacyContent').textContent = data.privacy || 'No privacy analysis available';
+            
+            // Timestamp
+            document.getElementById('timestamp').textContent = data.timestamp;
+            
+            // Show results
+            document.getElementById('results').classList.remove('hidden');
+        }
+        
+        function displayError(message) {
+            document.getElementById('errorMessage').textContent = message;
+            document.getElementById('errorMessage').classList.remove('hidden');
+        }
+    </script>
+</body>
+</html>

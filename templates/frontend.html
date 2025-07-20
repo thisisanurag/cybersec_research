@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+<head>
+    <title>AI Cybersecurity & Privacy Analyzer</title>
+</head>
+<body>
+    <h2>AI Cybersecurity & Privacy Analyzer</h2>
+    <form id="analyzeForm">
+        <label>Company Name: <input name="company" required></label><br>
+        <label>Algorithm Name: <input name="algorithm" required></label><br>
+        <label>Description: <input name="description"></label><br>
+        <label>Year Range (e.g. 2015-2016): <input name="year_range" required></label><br>
+        <button type="submit">Analyze</button>
+    </form>
+    <div id="error" style="color:red;"></div>
+    <div id="result"></div>
+    <script>
+        document.getElementById('analyzeForm').onsubmit = async function(e) {
+            e.preventDefault();
+            document.getElementById('error').textContent = '';
+            document.getElementById('result').textContent = 'Loading...';
+            const form = e.target;
+            const data = {
+                company: form.company.value,
+                algorithm: form.algorithm.value,
+                description: form.description.value,
+                year_range: form.year_range.value
+            };
+            try {
+                const res = await fetch('/analyze', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(data)
+                });
+                const result = await res.json();
+                if (res.status !== 200) {
+                    document.getElementById('error').textContent = result.error || 'Error occurred.';
+                    document.getElementById('result').textContent = '';
+                    return;
+                }
+                document.getElementById('result').innerHTML = `
+                    <h3>Results</h3>
+                    Company: ${result.company}<br>
+                    Algorithm: ${result.algorithm}<br>
+                    Year Range: ${result.year_range}<br><br>
+                    Cybersecurity Code: ${result.cybersecurity.code}<br>
+                    Cybersecurity Justification: ${result.cybersecurity.justification}<br>
+                    Cybersecurity Sources: ${result.cybersecurity.sources}<br><br>
+                    Privacy Code: ${result.privacy.code}<br>
+                    Privacy Justification: ${result.privacy.justification}<br>
+                    Privacy Sources: ${result.privacy.sources}<br><br>
+                    Timestamp: ${result.timestamp}
+                `;
+            } catch (err) {
+                document.getElementById('error').textContent = 'Network or server error.';
+                document.getElementById('result').textContent = '';
+            }
+        };
+    </script>
+</body>
+</html>
