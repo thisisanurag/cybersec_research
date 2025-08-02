@@ -1,226 +1,266 @@
 from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 import os
-from openai import OpenAI
 from datetime import datetime
+from dotenv import load_dotenv
 
+from openai import OpenAI
+from serpapi import GoogleSearch
+
+Load .env
+load_dotenv()
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
+
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+if not OPENAI_KEY:
+    raise RuntimeError("Please set OPENAI_API_KEY in your environment")
+if not SERPAPI_KEY:
+    raise RuntimeError("Please set SERPAPI_KEY in your environment")
+
+client = OpenAI(api_key=OPENAI_KEY)
 
 
-# Initialize OpenAI client
-client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+def fetch_urls(query, year_range, company, limit=20):
+    """
+    Use SerpApi to grab the top URLs related to query, restricting results to on or before year_range.
+    Domain-bias helps steer toward official or relevant domains.
+    """
+    advanced_query = f'" "{query}" ("cybersecurity protections" OR "security measures" OR "data protection") on or before:{year_range}'
+
+    print(f"[INFO] SerpApi Query: {advanced_query}")
+
+    search = GoogleSearch({
+        "api_key": SERPAPI_KEY,
+        "q": advanced_query,
+        "num": limit
+    })
+
+    results = search.get_dict().get("organic_results", [])
+    urls = [r.get("link", "") for r in results if "link" in r]
+
+    print(f"[INFO] URLs found: {urls}")
+
+    return urls[:limit]
 
 
-if not os.getenv('OPENAI_API_KEY'):
-    raise RuntimeError(
-        'OPENAI_API_KEY environment variable not set. Please set it to your OpenAI API key.')
+def cybersec_prompt(company, algo, year_range, desc="", urls=None):
+    urls_block = ""
+    if urls:
+        urls_block = "Here are URLs that may help your assessment:\n" + \
+            "\n".join(f"- {u}" for u in urls) + "\n\n"
 
-# Context provided by the user
-guidelines_context = """
-Guidelines for Measuring Developer Organization’s Technical Cybersecurity and Privacy Protections Over a Given Algorithm Within a Year of Problem Emergence
-
-BASIC CONCEPTS:
-• Pair of algorithms: in this study, we formed pairs of algorithms. Each pair has a “problematic algorithm” and matched “problem-free algorithm.”
-• Problematic Algorithm: an algorithm which experienced one or more of the following problems: cybersecurity breach, privacy breach, IT failure.
-• Problem-free Algorithm: another algorithm which was very similar to the problematic algorithm in the pair, but it had not experienced any of the cybersecurity, privacy, or IT failure problems experienced by the problematic algorithm in the pair as of the year of problem emergence.
-• Year of Problem Emergence: The year in which the problematic algorithm in the pair experienced a problem.
-• Developer Organization: the organization which developed a given algorithm.
-• Timeframe of measurement of develop organization’s technical cybersecurity and privacy protections over a given algorithm: To delineate cause-and-effect, we will measure the protections one year before the Year of Problem Emergence. For instance, if the year of problem emergence is 2016, please search for evidence of the technical protections from year 2015 to year 2016.
-
-MEASUREMENT of NEWLY ADDED VARIABLES
-[200] DevOrgTechCyberProtect
-Developer Org’s technical cybersecurity protections for a given AI within a year of problem emergence.
-Question: In the year before the Year of Problem Emergence, was there any publicly available evidence that the developer organization have any technical cybersecurity protections over the given algorithm?
-Answer choices to select from in the Excel sheet:
-• [0]. No evidence that developer org had technical cybersecurity protections for the given AI within a year of the problem emergence year.
-• [1]. Symbolic evidence that developer org had technical cybersecurity protections for the given AI within a year of the problem emergence year.
-• [2]. Substantive evidence that developer org had technical cybersecurity protections for the given AI within a year of the problem emergence year.
-
-[201] DevOrgTechPrivacyProtect
-Developer Org’s technical privacy protections for a given AI in the year of problem emergence
-Question: In the year before the Year of Problem Emergence, was there any publicly available evidence that the developer organization had any technical privacy protections over the given algorithm?
-Answer choices to select from in the Excel sheet:
-• [0]. No evidence that developer org had technical privacy protections for the given AI within a year of the problem emergence year.
-• [1]. Symbolic evidence that developer org had technical privacy protections for the given AI within a year of the problem emergence year.
-• [2]. Substantive evidence that developer org had technical privacy protections for the given AI within a year of the problem emergence year.
-
-Columns for Justification of Answers and Documentation of Supporting Evidence
-Each variable you code will be followed by a justification column and a Source document column.
-
-JUSTIFICATION COLUMNS
-- [200a] JustifyDevOrgTechCyberProtect
-- [201a] JustifyDevOrgTechPrivacyProtect
-Ask you to briefly justify why you selected [0] or [1] or [2] as an answer.
-If you selected “[0]. No evidence…” in the justification column next to the measure, please briefly explain how you conducted the searches. A critic may argue that you did not find any evidence of the protection because you did not do the searches properly (e.g., not using the relevant keywords, not searching in the correct timeframe, not checking relevant company websites and documents, etc.). Your explanation should convince a critic that you did the searches with the right keywords, within the right timeframe, and in the right sources (e.g., snapshot of company websites in the WayBack Machine and Google and GenAI searches in the right timeframe, i.e., within a year before the problem emergence year). If you selected [1] or [2], briefly discuss why you selected “[1] Symbolic evidence” rather than “[2] Substantive evidence” or vice versa.
-
-SOURCE DOCUMENT COLUMNS
-- [200b] SourceDevOrgTechCyberProtect
-- [201b] SourceDevOrgTechPrivacyProtect
-Ask you to document the sources in which you found the supporting evidence for your answers.
-If no evidence was found, leave the cell blank.
-If you found “[1] Symbolic evidence” or “[2] Substantive evidence,” copy and paste the URL in which you saw the evidence.
-
+    return f"""{urls_block}
+You are a cybersecurity analyst. Assess whether {company} applied any technical cybersecurity protections for its {algo} on or before {year_range}.
 TIPS FOR IDENTIFYING TECHNICAL CYBERSECURITY PROTECTIONS OVER A GIVEN ALGORITHM:
-Algorithms are now the attack surface (the targets) for cybersecurity attacks such as confidentiality attacks, Integrity attacks, and availability attacks. These attacks are known as the C.I.A. triad of cybersecurity. Confidentiality attacks aims to steal sensitive data or intellectual property of an AI model. Integrity attack aims to manipulate the decision outcomes of the AI model. Availability attacks aim to slow down the services of the AI model or make them unavailable to legitimate users. There are many types of cybersecurity attacks on AI and ML systems. MITRE ATLAS Framework keeps a repository of the emerging cyber attack techniques on AI and ML. If available, the framework also discusses protections / mitigations against these attacks. Please familiarize yourself with this framework and the types of cyber attacks on AI:
+Algorithms are now the attack surface (the targets) for cybersecurity attacks such as confidentiality attacks, Integrity attacks, and availability attacks. 
+These attacks are known as the C.I.A. triad of cybersecurity. Confidentiality attacks aims to steal sensitive data or intellectual property of an AI model. 
+Integrity attack aims to manipulate the decision outcomes of the AI model. Availability attacks aim to slow down the services of the AI model  or make 
+them unavailable to legitimate users. There are many types of cybersecurity attacks on AI  and ML systems. 
+MITRE ATLAS Framework keeps a repository of the emerging cyber attack techniques on AI and ML. If available, the framework also discusses protections /
+mitigations against these attacks. Please familiarize yourself with this framework and the types of cyber attacks on AI:  
 https://atlas.mitre.org/matrices/ATLAS
-Our goal is to assess if the developer organization was using any technical cybersecurity protections within a year before the emergence of the problem to protect the given algorithm against any of these cybersecurity attacks.
-"""
 
+Treat the URLs above as context, but use your expertise to simulate missing details like publication years or titles. Our goal is to assess if the {company} 
+was using any technical cybersecurity protections {year_range} before the emergence of the  problem to protect the given algorithm against any of 
+these cybersecurity attacks. dont mention anything irrelevant to {algo} or {company}.mif you find {company} has taken mitigations or is at least aware about the problem, mention accordingly, otherwise dont mention anything irrelevant.
 
-def cybersec_prompt(company, algo, year_range, desc=""):
-    return f"""
-{guidelines_context}
-
----
-
-**Original Query:**
-
-You are a cybersecurity analyst with access to comprehensive industry knowledge, regulatory filings, news reports, academic research, and company documentation. Analyze the specific cybersecurity protections {company} implemented for its {algo} during {year_range}.
-
-
-**Analysis Requirements:**
-1. Provide concrete, evidence-based assessments rather than generic industry assumptions.
-2. Reference specific company announcements, regulatory filings, security incidents, or documented practices.
-3. Include actual URLs and sources where this information was documented.
-4. Distinguish between confirmed implementations and likely practices.
-5. Address specific vulnerabilities relevant to {algo} type systems.
-
-
-**Research Areas to Investigate:**
-- Company security announcements and transparency reports
-- Regulatory compliance filings and enforcement actions
-- Security incident reports and company responses
-- Academic research on the company's security practices
-- Congressional testimony or government assessments
-- Third-party security audits or certifications
-- Patent filings related to security implementations
-- Industry reports specifically mentioning the company
-
-
-**Specific Security Domains to Analyze:**
-1. **Data Protection & Encryption**: Documented encryption standards, data residency controls, access segregation.
-2. **Access Controls**: Authentication systems, employee access policies, documented access violations.
-3. **Algorithm Integrity**: Anti-manipulation measures, adversarial testing, model protection.
-4. **Monitoring & Incident Response**: Security monitoring systems, documented incident responses.
-5. **Regulatory Compliance**: Specific compliance frameworks, fines, or enforcement actions.
-6. **Third-party Security**: External audits, security partnerships, infrastructure providers.
-
-
-{f'Algorithm Context: {desc}' if desc else ''}
-
-
-**Output Format (Based on Guidelines):**
-For variable [200] DevOrgTechCyberProtect, provide your full analysis, including the code, justification, and sources in a single text block, clearly labeled as requested in the guidelines.
-
-**Code**: [0, 1, or 2]
-**Justification**: [JustifyDevOrgTechCyberProtect - Specific evidence with dates, incidents, or documented practices, explaining why you chose 0, 1, or 2]
-**Sources**: [SourceDevOrgTechCyberProtect - Actual URLs, document titles, or specific references]
-
-**Additional Requirements:**
-- Prioritize company-specific sources over generic industry standards.
-- Include both positive security implementations and documented failures/incidents.
-- Provide context about why certain protections were implemented (regulatory pressure, incidents, etc.).
-- Note any gaps or limitations in available documentation.
-
-Focus on factual, documented evidence rather than assumptions about what the company "would likely" implement.
-"""
-
-
-def privacy_prompt(company, algo, year_range, desc=""):
-    return f"""
-{guidelines_context}
+Respond in EXACTLY the following structured format:
 
 ---
 
-**Original Query:**
+**[200] DevOrgTechCyberProtect:**  
+(Choose ONE: No Evidence, Symbolic Evidence, or Substantive Evidence)
 
-Did {company} use any technical privacy enhancing techniques (PETs) to protect the privacy of the data collected and managed by its {algo} in years {year_range}?
-Some examples of PETs are differential privacy; federated Learning; homomorphic encryption; secure multi-party computation; synthetic data generation; trusted execution environments; running code in a secure hardware enclave; and machine unlearning.
-Search snapshots of {company} websites in {year_range}; include the URLs in which you find relevant evidence; check if there were any academic papers discussing privacy protections of the {algo} in {year_range}
-{f'Algorithm description: {desc}' if desc else ''}
+---
 
-**Output Format (Based on Guidelines):**
-For variable [201] DevOrgTechPrivacyProtect, provide your full analysis, including the code, justification, and sources in a single text block, clearly labeled as requested in the guidelines.
+**[200a] JustifyDevOrgTechCyberProtect:**  
+- Explain clearly why you selected that level. Analyze all URLs together and simulate missing metadata as needed.
+- Consider both specific and {company}-level practices.
+- Use URLs retrieved by SerpApi to extract evidence of technical cybersecurity protections. If irrelevant, explicitly note it.
+- Also apply your own cybersecurity analyst knowledge to fill gaps — simulate plausible defenses the company may have implemented during the specified 
+time (e.g., model integrity checks, access controls, threat modeling, encryption, ML hardening, anomaly detection).
+- In your final summary, clearly separate what came from SerpApi links and what was inferred and your own analysis, then synthesize both into a reasoned 
+judgment about whether the protections were symbolic, substantive, or absent.
 
-**Code**: [0, 1, or 2]
-**Justification**: [JustifyDevOrgTechPrivacyProtect - Your explanation for why you chose 0, 1, or 2]
-**Sources**: [SourceDevOrgTechPrivacyProtect - URLs if any, or 'No sources found']
+---
+
+**[200b.1] SourceURLsFromSerpApi:**
+Only list the URLs directly provided via SerpApi, along with their metadata and relevance assessment.
+
+If a URL is irrelevant or only marginally related, say so clearly in the relevance field.
+
+Example:
+
+URL: https://example.com/page
+Title/Snippet: "Document Title"
+Year: YYYY
+Relevance: Weak or no relevance to {company} or {algo} — retained only as part of SerpApi search results.
+
+**[200b.2] SourceURLsFromAnalystInference:**
+Now, based on your own expert knowledge (without using SerpApi URLs), simulate likely or known real-world URLs, reports, or official resources that support your conclusions. Generate realistic-looking URLs only if no better data exists.
+
+Example:
+
+URL: https://about.fb.com/news/2020/fake-accounts
+Title/Snippet: "Update on Fake Account Detection"
+Year: 2020
+Relevance: Facebook official blog directly discussing ML-based protections for its account verification system.
+
+---
+
+Important:
+- Always generate 5 to 10 sources.
+- Include real or simulated metadata.
+- Focus strictly on {company} or its {algo}.
+- Do not output anything outside the 3 sections.
+- Keep SerpApi URLs and GPT-inferred URLs completely separate.
+- Do not blend general knowledge conclusions with SerpApi-derived URLs.
+- In [200a], clearly state whether your evidence relied more on actual URLs (from SerpApi) or on expert inference due to lack of strong source URLs.
+
+{f"Algorithm Context: {desc}" if desc else ""}
+"""
+
+
+def privacy_prompt(company, algo, year_range, desc="", urls=None):
+    urls_block = ""
+    if urls:
+        urls_block = "Here are URLs that may help your assessment:\n" + \
+            "\n".join(f"- {u}" for u in urls) + "\n\n"
+
+    return f"""{urls_block}
+You are an AI privacy researcher. Assess whether {company} applied any technical privacy protections (PETs) to its {algo} on or before {year_range}.
+
+PETs include Differential Privacy, Federated Learning, Homomorphic Encryption, etc.
+TIPS FOR IDENTIFYING TECHNICAL PRIVACY PROTECTIONS OVER A GIVEN ALGORITHM:
+An algorithm can leak private data in its training set or any other data it receives during usage. There are various “privacy preservation techniques” (PETs) that developer organizations can use to preserve the privacy of data managed by a given algorithm. Some examples of PETs include:
+-   Differential privacy
+-   Federated Learning
+-   Homomorphic encryption
+-   Secure Multi-Party Computation
+-   Synthetic Data Generation
+-   Trusted Execution Environments
+-   Run code in a secure hardware enclave
+-   Machine Unlearning
+
+Treat URLs as context. Simulate missing details (year, title) as needed. Our goal is to assess if the developer organization used any technical 
+privacy enhancing techniques, 
+such as the ones above, to protect privacy of the given {algo}, {year_range} before the emergence of the  problem. dont mention anything irrelevant to {algo} or {company}.
+if you find {company} has taken mitigations or is at least aware about the problem, mention accordingly, otherwise dont mention anything irrelevant.
+
+Respond in EXACTLY the following structured format:
+
+---
+
+**[201] DevOrgTechPrivacyProtect:**  
+(Choose ONE: No Evidence, Symbolic Evidence, or Substantive Evidence)
+
+---
+
+**[201a] JustifyDevOrgTechPrivacyProtect:**  
+- Explain clearly your assessment. Use company practices and URLs. Simulate missing metadata.
+- Consider both specific and {company}-level practices.
+- Use URLs retrieved by SerpApi to extract evidence of privacy protections. If irrelevant, explicitly note it.
+- Also use your own analyst-level knowledge to fill in gaps — simulate documentation, policies, or techniques realistically used during the specified 
+time range.
+- In your final summary, clearly distinguish which insights came from SerpApi URLs and which were inferred. Then synthesize both - urls from serpai 
+and your own analysis into a coherent judgment on whether substantive/symbolic/no privacy protections were applied to the {algo} or {company} systems.
+
+---
+
+**[201b.1] SourceURLsFromSerpApi:**
+Only list the URLs directly provided via SerpApi, along with their metadata and relevance assessment.
+
+If a URL is irrelevant or only marginally related, say so clearly in the relevance field.
+
+Example:
+
+URL: https://example.com/page
+Title/Snippet: "Document Title"
+Year: YYYY
+Relevance: Weak or no relevance to {company} or {algo} — retained only as part of SerpApi search results.
+
+**[201b.2] SourceURLsFromAnalystInference:**
+Now, based on your own expert knowledge (without using SerpApi URLs), simulate likely or known real-world URLs, reports, or official resources that support your conclusions. Generate realistic-looking URLs only if no better data exists.
+
+Example:
+
+URL: https://about.fb.com/news/2020/fake-accounts
+Title/Snippet: "Update on Fake Account Detection"
+Year: 2020
+Relevance: Facebook official blog directly discussing ML-based protections for its account verification system.
+
+---
+
+Important:
+- Always generate 5 to 10 sources.
+- Include real or simulated metadata.
+- Focus strictly on {company} or its {algo}.
+- Do not output anything outside the 3 sections.
+- Keep SerpApi URLs and GPT-inferred URLs completely separate.
+- Do not blend general knowledge conclusions with SerpApi-derived URLs.
+- In [200a], clearly state whether your evidence relied more on actual URLs (from SerpApi) or on expert inference due to lack of strong source URLs.
+
+{f"Algorithm Context: {desc}" if desc else ""}
 """
 
 
 def gpt_query(prompt):
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=1.0,
-            max_tokens=800
-        )
-        print(response.choices[0].message.content)
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"Error: {str(e)}"
+    resp = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=1.0,
+        max_tokens=2000,
+    )
+    return resp.choices[0].message.content
 
 
-@app.route('/analyze', methods=['POST', 'OPTIONS'])
+@app.route("/analyze", methods=["POST", "OPTIONS"])
 def analyze():
-    # Handle preflight OPTIONS request
-    if request.method == 'OPTIONS':
-        response = make_response()
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add('Access-Control-Allow-Headers', "*")
-        response.headers.add('Access-Control-Allow-Methods', "*")
-        return response
+    if request.method == "OPTIONS":
+        resp = make_response()
+        resp.headers.update({
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Allow-Methods": "*"
+        })
+        return resp
 
-    try:
-        data = request.get_json()
+    data = request.get_json(force=True)
+    company = data.get("company", "").strip()
+    algo = data.get("algorithm", "").strip()
+    desc = data.get("description", "").strip()
+    year_range = data.get("year_range", "").strip()
 
-        if not data:
-            return jsonify({'error': 'No JSON data received'}), 400
+    if not (company and algo and year_range):
+        return jsonify(error="company, algorithm, and year_range are required"), 400
 
-        company = data.get('company', '').strip()
-        algorithm = data.get('algorithm', '').strip()
-        description = data.get('description', '').strip()
-        year_range = data.get('year_range', '').strip()
+    cs_query = f"{company} took any measures in regards to cybersecurity protections for {algo} or {company} level for {company}"
+    pr_query = f"{company} took any measures in regards to privacy protections for {algo} or {company} level for {company}"
+    cs_urls = fetch_urls(cs_query, year_range, company)
+    pr_urls = fetch_urls(pr_query, year_range, company)
 
-        if not all([company, algorithm, year_range]):
-            return jsonify({'error': 'Please fill in all required fields.'}), 400
+    cs_prompt = cybersec_prompt(company, algo, year_range, desc, cs_urls)
+    pr_prompt = privacy_prompt(company, algo, year_range, desc, pr_urls)
 
-        # Debug log
-        print(f"Processing request: {company}, {algorithm}, {year_range}")
+    cs_answer = gpt_query(cs_prompt)
+    pr_answer = gpt_query(pr_prompt)
 
-        # Cybersecurity
-        cybersec_prompt_text = cybersec_prompt(
-            company, algorithm, year_range, description)
-        cybersec_response = gpt_query(cybersec_prompt_text)
-
-        # Privacy
-        privacy_prompt_text = privacy_prompt(
-            company, algorithm, year_range, description)
-        privacy_response = gpt_query(privacy_prompt_text)
-
-        # Construct the result with the full, unparsed responses
-        result = {
-            'company': company,
-            'algorithm': algorithm,
-            'year_range': year_range,
-            'cybersecurity': cybersec_response,
-            'privacy': privacy_response,
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        }
-
-        response = jsonify(result)
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        return response
-
-    except Exception as e:
-        print(f"Error processing request: {str(e)}")  # Debug log
-        response = jsonify({'error': f'Server error: {str(e)}'})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        return response, 500
+    return jsonify({
+        "company": company,
+        "algorithm": algo,
+        "year_range": year_range,
+        "cybersecurity": cs_answer,
+        "privacy": pr_answer,
+        "searched_urls": {
+            "cybersec": cs_urls,
+            "privacy": pr_urls
+        },
+        "timestamp": datetime.utcnow().isoformat()
+    })
 
 
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
