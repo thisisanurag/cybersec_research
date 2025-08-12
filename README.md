@@ -23,9 +23,8 @@ Follow these steps exactly. All commands can be copied and pasted into your term
 First, copy all the project files from the repository to your computer. This will include the main scripts and the `requirements.txt` file.
 
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/thisisanurag/cybersec_research.git
 ```
-*(Replace `<your-repository-url>` with the actual URL of your Git repository)*
 
 ---
 
@@ -34,9 +33,8 @@ git clone <your-repository-url>
 Move into the newly created folder.
 
 ```bash
-cd <repository-folder-name>
+cd cybersec_research
 ```
-*(The folder name is usually the last part of the repository URL)*
 
 ---
 
@@ -53,7 +51,8 @@ source venv/bin/activate
 **On Windows:**
 ```bash
 python -m venv venv
-.\venv\Scripts\activate```
+.\venv\Scripts\activate
+```
 *After running the activate command, you should see `(venv)` at the beginning of your terminal prompt.*
 
 ---
@@ -62,7 +61,7 @@ python -m venv venv
 
 Now, install all the packages listed in the `requirements.txt` file that came with the project.
 
-```bash
+```
 pip install -r requirements.txt
 ```
 
@@ -93,14 +92,14 @@ You are now ready to start the backend server.
     In your terminal (make sure your `(venv)` is still active), run the following command:
 
     ```bash
-    python updated_backend.py
+    python backend.py
     ```
 
 2.  **Verify it's Running:**
     You should see output that looks like this, which means the server is running successfully:
 
     ```
-     * Serving Flask app 'updated_backend'
+     * Serving Flask app 'backend'
      * Running on http://127.0.0.1:5000
     Press CTRL+C to quit
     ```
