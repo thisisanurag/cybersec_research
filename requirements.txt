@@ -1,4 +1,5 @@
 altgraph
+dotenv
 annotated-types
 anyio
 blinker
