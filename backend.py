@@ -1,30 +1,32 @@
 from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 import os
-import sys  # [NEW] Import the 'sys' module
-from datetime import datetime
-from dotenv import load_dotenv
+import sys
 import time
-import re
-
+from datetime import datetime, UTC  # Import UTC
+from dotenv import load_dotenv
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from openai import OpenAI
 from serpapi import GoogleSearch
+import string
 
-# This determines the correct path for the .env file, whether running as a script or as a PyInstaller executable.
+# Optional: For more accurate token counting
+try:
+    import tiktoken
+except ImportError:
+    print("[WARNING] tiktoken not installed. Install with `pip install tiktoken` for accurate token counting.")
+    tiktoken = None
+
+
 if getattr(sys, 'frozen', False):
-    # If the application is run as a bundle (frozen), the base path is the directory of the executable
     base_path = os.path.dirname(sys.executable)
 else:
-    # If run as a normal script, the base path is the script's directory
     base_path = os.path.dirname(os.path.abspath(__file__))
 
-# Construct the full path to the .env file
 dotenv_path = os.path.join(base_path, '.env')
-
-# Load the .env file from the explicit path
 load_dotenv(dotenv_path=dotenv_path)
-# --- End of new block ---
-
 
 app = Flask(__name__)
 CORS(app)
@@ -32,254 +34,365 @@ CORS(app)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
-# This check will now work correctly
+
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+OPENAI_MAX_COMPLETION_TOKENS = int(os.getenv(
+    "OPENAI_MAX_COMPLETION_TOKENS", "4000"))
+
+
+MODEL_CONTEXT_WINDOW = 128000
+
 if not OPENAI_API_KEY:
-    raise RuntimeError(f"Please set OPENAI_API_KEY in your environment. Looked for .env at: {dotenv_path}")
+    raise RuntimeError(
+        f"Please set OPENAI_API_KEY in your environment. Looked for .env at: {dotenv_path}")
 if not SERPAPI_KEY:
-    raise RuntimeError(f"Please set SERPAPI_KEY in your environment. Looked for .env at: {dotenv_path}")
+    raise RuntimeError(
+        f"Please set SERPAPI_KEY in your environment. Looked for .env at: {dotenv_path}")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# ----------------------------
+# SerpApi comprehensive search (no date filter)
+# ----------------------------
+
 
 def fetch_urls_comprehensive(base_query, year_range, company, limit_per_query=10):
-    """
-    Executes a battery of targeted searches to exhaustively cover different
-    types of web content, including academic, corporate, and developer sources.
-    """
-    all_urls = set()  # Use a set to automatically handle duplicates
+    all_urls = set()
 
-    # The 'before:' operator is crucial for accurate historical research.
-    date_filter = f"before:{year_range}-01-01"
-    
-    # Sanitize company name for use in URLs (e.g., "Google LLC" -> "google")
-    company_domain = company.lower().split(' ')[0].replace(',', '').replace('.', '')
+    # Robust domain token extraction: first word, lowercase, strip punctuation
+    first_token = company.strip().split()[0].lower() if company.strip() else ""
+    company_domain = first_token.translate(
+        str.maketrans("", "", string.punctuation))
 
-    # Define a list of targeted query templates. Each template has a different goal.
     search_templates = [
-        # 1. Core Search: Broad query for general documents and news.
-        f'("{company}" OR "{base_query}") ("cybersecurity protections" OR "privacy principles" OR "threat model") {date_filter}',
-        
-        # 2. Academic & Research Paper Search: Find deep technical documents.
-        f'("{company}" OR "{base_query}") (filetype:pdf OR site:arxiv.org OR site:acm.org) {date_filter}',
-        
-        # 3. Developer & Code Search: Find ground truth in code, READMEs, and developer discussions.
-        f'site:github.com/{company_domain} ("{base_query}" OR "security" OR "vulnerability") {date_filter}',
-        
-        # 4. Official Corporate Search: Find official statements on company-owned domains.
-        f'site:{company_domain}.com ("{base_query}" OR "security report" OR "responsible disclosure") {date_filter}',
-        
-        # 5. Security Community Search: Find discussions on security blogs and vulnerability databases.
-        f'("{company}" AND "{base_query}") (intext:"CVE-" OR "security advisory" OR "vulnerability report" OR site:threatpost.com OR site:krebsonsecurity.com) {date_filter}',
-        
-        # 6. Patent Search: Find early R&D on related security technology.
-        f'site:patents.google.com "{company}" "{base_query}" security {date_filter}'
+        f'("{company}" OR "{base_query}") ("cybersecurity protections" OR "privacy principles" OR "threat model")',
+        f'("{company}" OR "{base_query}") (filetype:pdf OR site:arxiv.org OR site:acm.org)',
+        f'site:github.com/{company_domain} ("{base_query}" OR "security" OR "vulnerability")' if company_domain else f'("{base_query}" OR "security" OR "vulnerability") site:github.com',
+        f'site:{company_domain}.com ("{base_query}" OR "security report" OR "responsible disclosure")' if company_domain else f'("{base_query}" OR "security report" OR "responsible disclosure")',
+        f'("{company}" AND "{base_query}") (intext:"CVE-" OR "security advisory" OR "vulnerability report" OR site:threatpost.com OR site:krebsonsecurity.com)',
+        f'site:patents.google.com "{company}" "{base_query}" security'
     ]
 
     for query in search_templates:
         print(f"[INFO] Executing Search Query: {query}")
-        search = GoogleSearch({
-            "api_key": SERPAPI_KEY,
-            "q": query,
-            "num": limit_per_query
-        })
-
+        search = GoogleSearch(
+            {"api_key": SERPAPI_KEY, "q": query, "num": limit_per_query})
         try:
             results = search.get_dict().get("organic_results", [])
-            urls_from_query = [res.get("link", "") for res in results if "link" in res]
-            
+            urls_from_query = [r.get("link") for r in results if isinstance(
+                r, dict) and r.get("link")]
             if urls_from_query:
                 print(f"[INFO]   => Found {len(urls_from_query)} URLs.")
                 all_urls.update(urls_from_query)
             else:
                 print(f"[INFO]   => No results for this query.")
-                
         except Exception as e:
             print(f"[ERROR] SerpApi search failed for query '{query}': {e}")
-            
-        time.sleep(1) # Add a small delay between queries to be polite to the API
+        time.sleep(1)
 
-    print(f"[SUCCESS] Total unique URLs found across all searches: {len(all_urls)}")
+    print(
+        f"[SUCCESS] Total unique URLs found across all searches: {len(all_urls)}")
     return list(all_urls)
 
+# ----------------------------
+# Robust Wayback CDX windowed check (with retries/backoff)
+# ----------------------------
 
-def cybersec_prompt(company, algo, year_range, desc="", urls=None):
+
+def _make_retrying_session(total_retries=4, backoff_factor=0.9, status_forcelist=(500, 502, 503, 504)):
+    sess = requests.Session()
+    retry = Retry(
+        total=total_retries,
+        backoff_factor=backoff_factor,  # exponential backoff
+        status_forcelist=status_forcelist,
+        allowed_methods=frozenset(["GET"]),
+        raise_on_status=False,
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(
+        max_retries=retry, pool_connections=10, pool_maxsize=10)
+    sess.mount("https://", adapter)
+    sess.mount("http://", adapter)
+    # Reasonable UA helps reduce blocking
+    sess.headers.update(
+        {"User-Agent": "cybersec-research/1.0 (+https://example.org)"})
+    return sess
+
+
+def wayback_check_urls_cdx(urls, cutoff_year):
+    meta = {}
+    try:
+        cutoff = int(cutoff_year)
+        if not (1996 <= cutoff <= datetime.now().year + 1):  # Sanity check for cutoff year
+            raise ValueError("Cutoff year out of reasonable range.")
+    except Exception as e:
+        for u in urls:
+            meta[u] = {"valid": False, "snapshot_year": None,
+                       "error": f"Invalid cutoff year: {e}"}
+        return meta
+
+    end_year = cutoff - 1   # Inclusive end for the new window
+
+    # Start year: to maintain a 5-year window ending at 'end_year'
+    start_year_for_window = end_year - 5  # e.g., if end_year=2017, start_year=2012
+
+    from_ts = f"{start_year_for_window}0101000000"  # Add time for precision
+    to_ts = f"{end_year}1231235959"   # Add time for precision
+
+    base = "https://web.archive.org/cdx/search/cdx"
+    print(f"[INFO] Wayback CDX range: {from_ts} to {to_ts}")
+
+    session = _make_retrying_session(total_retries=4, backoff_factor=0.9)
+    per_request_timeout = 25 
+    pause_between_calls = 0.35 
+    last_call = 0.0
+
+    for idx, u in enumerate(urls, start=1):
+        try:
+            # Mild pacing
+            elapsed = time.time() - last_call
+            if elapsed < pause_between_calls:
+                time.sleep(pause_between_calls - elapsed)
+
+            params = {
+                "url": u,
+                "from": from_ts,
+                "to": to_ts,
+                "output": "json",
+                "filter": "statuscode:200",
+                "fastLatest": "true",
+                "limit": "1",
+            }
+            resp = session.get(base, params=params,
+                               timeout=per_request_timeout)
+            last_call = time.time()
+
+            if resp.status_code == 429:
+                print(
+                    f"[WARNING] Rate limited by Wayback CDX for {u}. Retrying will occur.")
+                meta[u] = {"valid": False, "snapshot_year": None,
+                           "error": f"CDX Rate Limit ({resp.status_code})"}
+                continue  # Let retry mechanism handle it or mark as error for this pass
+
+            if resp.status_code >= 500:
+                meta[u] = {"valid": False, "snapshot_year": None,
+                           "error": f"CDX Server Error ({resp.status_code})"}
+                continue
+
+            try:
+                data = resp.json()
+            except Exception:
+                meta[u] = {"valid": False, "snapshot_year": None,
+                           "error": f"Non-JSON response: {resp.text[:200]}"}
+                continue
+
+            if len(data) > 1 and isinstance(data[1], list) and len(data[1]) > 1:
+                latest_capture = data[1]
+                # Timestamp is typically the second element
+                ts = latest_capture[1]
+                snap_year = int(ts[:4]) if ts and len(ts) >= 4 else None
+
+                # Check validity against the new window
+                is_valid = (
+                    snap_year is not None and start_year_for_window <= snap_year <= end_year)
+                meta[u] = {"valid": is_valid, "snapshot_year": snap_year}
+            else:
+                meta[u] = {"valid": False, "snapshot_year": None}
+
+        except requests.exceptions.ReadTimeout as e:
+            meta[u] = {"valid": False, "snapshot_year": None,
+                       "error": f"Read timeout: {e}"}
+        except requests.exceptions.ConnectTimeout as e:
+            meta[u] = {"valid": False, "snapshot_year": None,
+                       "error": f"Connect timeout: {e}"}
+        except requests.exceptions.ConnectionError as e:
+            meta[u] = {"valid": False, "snapshot_year": None,
+                       "error": f"Connection error: {e}"}
+        except Exception as e:
+            meta[u] = {"valid": False, "snapshot_year": None, "error": str(e)}
+
+    return meta
+
+
+def cybersec_prompt(company, algo, year, desc="", urls_and_wayback_meta=None):  # Changed argument
     urls_block = ""
-    if urls:
-        urls_block = "Here are URLs that may help your assessment:\n" + \
-            "\n".join(f"- {u}" for u in urls) + "\n\n"
 
-    # [MODIFIED] Added the requested coding scheme to the prompt below.
+    if urls_and_wayback_meta and isinstance(urls_and_wayback_meta, dict):
+        sorted_urls_with_meta = sorted(urls_and_wayback_meta.items(
+        ), key=lambda item: item[1].get("valid", False), reverse=True)
+
+        selected_urls_for_prompt = []
+        for u, meta in sorted_urls_with_meta:
+            selected_urls_for_prompt.append(
+                f"- {u} (Wayback year: {meta.get('snapshot_year', 'N/A')}, Valid for period: {meta.get('valid', False)})")
+            if len(selected_urls_for_prompt) >= 15:
+                break
+
+        if selected_urls_for_prompt:
+            urls_block = "Here are up to 15 URLs (prioritizing those with valid Wayback snapshots from before the cutoff) that may help your assessment:\n" + "\n".join(
+                selected_urls_for_prompt) + "\n\n"
+        else:
+            urls_block = "No relevant URLs found within the specified Wayback window to assist the assessment.\n\n"
+    elif urls_and_wayback_meta and isinstance(urls_and_wayback_meta, list):
+        selected_urls = urls_and_wayback_meta[:15]  # Just take the first 15
+        if selected_urls:
+            urls_block = "Here are up to 15 URLs that may help your assessment:\n" + \
+                "\n".join(f"- {u}" for u in selected_urls) + "\n\n"
+        else:
+            urls_block = "No URLs provided to assist the assessment.\n\n"
+
     return f"""{urls_block}
-You are a cybersecurity analyst. Assess whether {company} applied any technical cybersecurity protections for its {algo} on or before {year_range}.
-TIPS FOR IDENTIFYING TECHNICAL CYBERSECURITY PROTECTIONS OVER A GIVEN ALGORITHM:
-Algorithms are now the attack surface (the targets) for cybersecurity attacks such as confidentiality attacks, Integrity attacks, and availability attacks. 
-These attacks are known as the C.I.A. triad of cybersecurity. Confidentiality attacks aims to steal sensitive data or intellectual property of an AI model. 
-Integrity attack aims to manipulate the decision outcomes of the AI model. Availability attacks aim to slow down the services of the AI model  or make 
-them unavailable to legitimate users. There are many types of cybersecurity attacks on AI  and ML systems. 
-MITRE ATLAS Framework keeps a repository of the emerging cyber attack techniques on AI and ML. If available, the framework also discusses protections /
-mitigations against these attacks. Please familiarize yourself with this framework and the types of cyber attacks on AI:  
-https://atlas.mitre.org/matrices/ATLAS
-
-Treat the URLs above as context, but use your expertise to simulate missing details like publication years or titles. Our goal is to assess if the {company} 
-was using any technical cybersecurity protections {year_range} before the emergence of the  problem to protect the given algorithm against any of 
-these cybersecurity attacks. dont mention anything irrelevant to {algo} or {company}.mif you find {company} has taken mitigations or is at least aware about the problem, mention accordingly, otherwise dont mention anything irrelevant.
-
-Respond in EXACTLY the following structured format:
+You are a cybersecurity analyst. Assess whether {company} applied any technical cybersecurity protections for its {algo} on or before {year}. Focus strictly on {company}/{algo}. Produce a concise answer in the exact structured format below.
 
 ---
-
-**[200] DevOrgTechCyberProtect:**  
-(Choose ONE: No Evidence, Symbolic Evidence, or Substantive Evidence)
-**No Evidence: [0]**
-**Symbolic Evidence: [1]**
-**Substantive Evidence: [2]**
-
----
+** DevOrgTechCyberProtect:**  
+Assign the code according to the following:
+No Evidence: [0]
+Symbolic Evidence: [1]
+Substantive Evidence: [2]
 
 **[200a] JustifyDevOrgTechCyberProtect:**  
-- Explain clearly why you selected that level. Analyze all URLs together and simulate missing metadata as needed.
+- Explain clearly why you selected that level. Analyze all provided URLs together and simulate missing metadata as needed.
 - Consider both specific and {company}-level practices.
-- Use URLs retrieved by SerpApi to extract evidence of technical cybersecurity protections. If irrelevant, explicitly note it.
-- Also apply your own cybersecurity analyst knowledge to fill gaps — simulate plausible defenses the company may have implemented during the specified 
-time (e.g., model integrity checks, access controls, threat modeling, encryption, ML hardening, anomaly detection).
-- In your final summary, clearly separate what came from SerpApi links and what was inferred and your own analysis, then synthesize both into a reasoned 
-judgment about whether the protections were symbolic, substantive, or absent.
-
----
+- Use the provided URLs (especially those with valid Wayback snapshots) to extract evidence of technical cybersecurity protections. If a URL is irrelevant or invalid for the time period, explicitly note it.
+- Also apply your own cybersecurity analyst knowledge to fill gaps — simulate plausible defenses during the specified time (e.g., model integrity checks, access controls, encryption, anomaly detection).
+- In your final summary, clearly separate what came from provided links and what was inferred by your own analysis, then synthesize both into a reasoned judgment.
 
 **[200b.1] SourceURLsFromSerpApi:**
-Only list the URLs directly provided via SerpApi, along with their metadata and relevance assessment.
-
-If a URL is irrelevant or only marginally related, say so clearly in the relevance field.
-
-Example:
-
-URL: https://example.com/page
-Title/Snippet: "Document Title"
-Year: YYYY
-Relevance: Weak or no relevance to {company} or {algo} — retained only as part of SerpApi search results.
-
+Only list the URLs directly provided above that were deemed relevant by your analysis and had valid Wayback snapshots for the period. Include their associated Wayback year if available.
 **[200b.2] SourceURLsFromAnalystInference:**
-Now, based on your own expert knowledge (without using SerpApi URLs), simulate likely or known real-world URLs, reports, or official resources that support your conclusions. Generate realistic-looking URLs only if no better data exists.
+List simulated or known URLs supporting your conclusions.
 
-Example:
+{f"Algorithm Context: {desc}" if desc else ""}"""
 
-URL: https://about.fb.com/news/2020/fake-accounts
-Title/Snippet: "Update on Fake Account Detection"
-Year: 2020
-Relevance: Facebook official blog directly discussing ML-based protections for its account verification system.
 
----
-
-Important:
-- Always generate 5 to 10 sources.
-- Include real or simulated metadata.
-- Focus strictly on {company} or its {algo}.
-- Do not output anything outside the 3 sections.
-- Keep SerpApi URLs and GPT-inferred URLs completely separate.
-- Do not blend general knowledge conclusions with SerpApi-derived URLs.
-- In [200a], clearly state whether your evidence relied more on actual URLs (from SerpApi) or on expert inference due to lack of strong source URLs.
-
-{f"Algorithm Context: {desc}" if desc else ""}
-"""
-
-def privacy_prompt(company, algo, year_range, desc="", urls=None):
+def privacy_prompt(company, algo, year, desc="", urls_and_wayback_meta=None):  # Changed argument
     urls_block = ""
-    if urls:
-        urls_block = "Here are URLs that may help your assessment:\n" + \
-            "\n".join(f"- {u}" for u in urls) + "\n\n"
 
-    # [MODIFIED] Added the requested coding scheme to the prompt below.
+    if urls_and_wayback_meta and isinstance(urls_and_wayback_meta, dict):
+        sorted_urls_with_meta = sorted(urls_and_wayback_meta.items(
+        ), key=lambda item: item[1].get("valid", False), reverse=True)
+
+        selected_urls_for_prompt = []
+        for u, meta in sorted_urls_with_meta:
+            selected_urls_for_prompt.append(
+                f"- {u} (Wayback year: {meta.get('snapshot_year', 'N/A')}, Valid for period: {meta.get('valid', False)})")
+            if len(selected_urls_for_prompt) >= 15:  # Limit to 15 URLs for prompt
+                break
+
+        if selected_urls_for_prompt:
+            urls_block = "Here are up to 15 URLs (prioritizing those with valid Wayback snapshots from before the cutoff) that may help your assessment:\n" + "\n".join(
+                selected_urls_for_prompt) + "\n\n"
+        else:
+            urls_block = "No relevant URLs found within the specified Wayback window to assist the assessment.\n\n"
+    elif urls_and_wayback_meta and isinstance(urls_and_wayback_meta, list):
+        selected_urls = urls_and_wayback_meta[:15]
+        if selected_urls:
+            urls_block = "Here are up to 15 URLs that may help your assessment:\n" + \
+                "\n".join(f"- {u}" for u in selected_urls) + "\n\n"
+        else:
+            urls_block = "No URLs provided to assist the assessment.\n\n"
+
     return f"""{urls_block}
-You are an AI privacy researcher. Assess whether {company} applied any technical privacy protections (PETs) to its {algo} on or before {year_range}.
+You are an AI privacy researcher. Assess whether {company} applied any technical privacy protections (PETs) to its {algo} on or before {year}. Focus strictly on {company}/{algo}. Produce a concise answer in the exact structured format below.
 
-PETs include Differential Privacy, Federated Learning, Homomorphic Encryption, etc.
-TIPS FOR IDENTIFYING TECHNICAL PRIVACY PROTECTIONS OVER A GIVEN ALGORITHM:
-An algorithm can leak private data in its training set or any other data it receives during usage. There are various “privacy preservation techniques” (PETs) that developer organizations can use to preserve the privacy of data managed by a given algorithm. Some examples of PETs include:
--   Differential privacy
--   Federated Learning
--   Homomorphic encryption
--   Secure Multi-Party Computation
--   Synthetic Data Generation
--   Trusted Execution Environments
--   Run code in a secure hardware enclave
--   Machine Unlearning
 
-Treat URLs as context. Simulate missing details (year, title) as needed. Our goal is to assess if the developer organization used any technical 
-privacy enhancing techniques, 
-such as the ones above, to protect privacy of the given {algo}, {year_range} before the emergence of the  problem. dont mention anything irrelevant to {algo} or {company}.
-if you find {company} has taken mitigations or is at least aware about the problem, mention accordingly, otherwise dont mention anything irrelevant.
-
-Respond in EXACTLY the following structured format:
-
----
-
-**[201] DevOrgTechPrivacyProtect:**  
-(Choose ONE: No Evidence, Symbolic Evidence, or Substantive Evidence)
-**No Evidence: [0]**
-**Symbolic Evidence: [1]**
-**Substantive Evidence: [2]**
-
----
+** DevOrgTechPrivacyProtect:**  
+Assign the code according to the following:
+No Evidence: [0]
+Symbolic Evidence: [1]
+Substantive Evidence: [2]
 
 **[201a] JustifyDevOrgTechPrivacyProtect:**  
-- Explain clearly your assessment. Use company practices and URLs. Simulate missing metadata.
+- Explain clearly your assessment. Use company practices and provided URLs. Simulate missing metadata.
 - Consider both specific and {company}-level practices.
-- Use URLs retrieved by SerpApi to extract evidence of privacy protections. If irrelevant, explicitly note it.
-- Also use your own analyst-level knowledge to fill in gaps — simulate documentation, policies, or techniques realistically used during the specified 
-time range.
-- In your final summary, clearly distinguish which insights came from SerpApi URLs and which were inferred. Then synthesize both - urls from serpai 
-and your own analysis into a coherent judgment on whether substantive/symbolic/no privacy protections were applied to the {algo} or {company} systems.
-
----
+- Use the provided URLs (especially those with valid Wayback snapshots) to extract evidence of privacy protections. If a URL is irrelevant or invalid for the time period, explicitly note it.
+- Also use your own analyst-level knowledge to fill gaps — simulate documentation or techniques likely used.
+- Clearly distinguish which insights came from provided URLs vs. inference, then synthesize both into a coherent judgment.
 
 **[201b.1] SourceURLsFromSerpApi:**
-Only list the URLs directly provided via SerpApi, along with their metadata and relevance assessment.
-
-If a URL is irrelevant or only marginally related, say so clearly in the relevance field.
-
-Example:
-
-URL: https://example.com/page
-Title/Snippet: "Document Title"
-Year: YYYY
-Relevance: Weak or no relevance to {company} or {algo} — retained only as part of SerpApi search results.
-
+Only list the URLs directly provided above that were deemed relevant by your analysis and had valid Wayback snapshots for the period. Include their associated Wayback year if available.
 **[201b.2] SourceURLsFromAnalystInference:**
-Now, based on your own expert knowledge (without using SerpApi URLs), simulate likely or known real-world URLs, reports, or official resources that support your conclusions. Generate realistic-looking URLs only if no better data exists.
+List simulated or known URLS supporting your conclusions.
 
-Example:
-
-URL: https://about.fb.com/news/2020/fake-accounts
-Title/Snippet: "Update on Fake Account Detection"
-Year: 2020
-Relevance: Facebook official blog directly discussing ML-based protections for its account verification system.
-
----
-
-Important:
-- Always generate 5 to 10 sources.
-- Include real or simulated metadata.
-- Focus strictly on {company} or its {algo}.
-- Do not output anything outside the 3 sections.
-- Keep SerpApi URLs and GPT-inferred URLs completely separate.
-- Do not blend general knowledge conclusions with SerpApi-derived URLs.
-- In [200a], clearly state whether your evidence relied more on actual URLs (from SerpApi) or on expert inference due to lack of strong source URLs.
-
-{f"Algorithm Context: {desc}" if desc else ""}
-"""
+{f"Algorithm Context: {desc}" if desc else ""}"""
 
 
-def gpt_query(prompt):
-    resp = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=1.0,
-        max_tokens=2000,
-    )
-    return resp.choices[0].message.content
 
 
+def gpt_query(prompt, model_name=None, max_out=None):
+    m = model_name or OPENAI_MODEL
+    o = OPENAI_MAX_COMPLETION_TOKENS if max_out is None else max_out
+
+    current_model_context_window = MODEL_CONTEXT_WINDOW
+
+    if tiktoken:
+        try:
+            encoding = tiktoken.encoding_for_model(m)
+        except KeyError:
+            print(
+                f"[WARNING] Model '{m}' not found in tiktoken; using 'cl100k_base' encoding for token count.")
+            encoding = tiktoken.get_encoding("cl100k_base")
+
+        prompt_tokens = len(encoding.encode(prompt))
+        print(f"[INFO] Prompt token count: {prompt_tokens}")
+
+        if prompt_tokens + o > current_model_context_window:
+            print(
+                f"[WARNING] Prompt ({prompt_tokens} tokens) + max_out ({o} tokens) exceeds model context window ({current_model_context_window}). Adjusting max_out.")
+            o = current_model_context_window - prompt_tokens - \
+                200
+            if o < 100:
+                o = 100
+                print(
+                    f"[WARNING] max_out drastically reduced to {o} tokens due to very long prompt after truncation.")
+            print(f"[INFO] New max_out: {o}")
+    else:
+        char_count = len(prompt)
+        estimated_tokens = char_count // 4
+        print(
+            f"[INFO] Estimated prompt token count (chars/4): {estimated_tokens}")
+        if estimated_tokens + o > current_model_context_window * 0.75:
+            print(
+                f"[WARNING] Estimated tokens ({estimated_tokens}) + max_out ({o}) likely exceeds model context window. Consider installing tiktoken or reducing prompt content.")
+            # Still attempt to reduce max_out based on estimate
+            o = max(100, int(current_model_context_window * 0.75) -
+                    estimated_tokens - 200)
+            print(f"[INFO] Reduced max_out to: {o}")
+
+    print("*"*50)
+    print("Length of prompt (chars)=", len(prompt))
+    print("OpenAI Model=", m)
+    print("Max completion tokens=", o)
+    print("*"*50)
+
+    try:
+        r = client.chat.completions.create(
+            model=m,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        chs = getattr(r, "choices", None)
+        if not chs or len(chs) == 0:
+            return None, "No choices returned from model."
+        c0 = chs[0]
+        msg = getattr(c0, "message", None)
+        if not msg:
+            return None, "First choice has no message."
+        txt = (getattr(msg, "content", "") or "").strip()
+        print("$"*10)
+        print(txt)
+        if txt:
+            return txt, None
+        fr = getattr(c0, "finish_reason", None)
+        return f"[No content returned; finish_reason={fr}]", None
+    except Exception as e:
+        print(f"[ERROR] OpenAI API call failed: {e}")
+        return None, str(e)
+
+
+# ----------------------------
+# Flask route
+# ----------------------------
 @app.route("/analyze", methods=["POST", "OPTIONS"])
 def analyze():
     if request.method == "OPTIONS":
@@ -300,42 +413,54 @@ def analyze():
     if not (company and algo and year_range):
         return jsonify(error="company, algorithm, and year_range are required"), 400
 
-    # Create focused base queries for cybersecurity and privacy
     cs_base_query = f'"{algo}" cybersecurity'
     pr_base_query = f'"{algo}" privacy'
 
-    # Use the new comprehensive search function for both topics.
     print("[INFO] Starting comprehensive URL fetch for Cybersecurity...")
     cs_urls = fetch_urls_comprehensive(cs_base_query, year_range, company)
 
-    print("\n[INFO] Starting comprehensive URL fetch for Privacy...")
+    print("[INFO] Starting comprehensive URL fetch for Privacy...")
     pr_urls = fetch_urls_comprehensive(pr_base_query, year_range, company)
 
-    # Combine the lists and de-duplicate for the prompts, as there can be overlap
-    # We can pass a unified list of all discovered URLs to both prompts
     combined_urls = list(set(cs_urls + pr_urls))
-    print(f"\n[INFO] Total unique URLs for analysis: {len(combined_urls)}")
+    print(f"[INFO] Total unique URLs for analysis: {len(combined_urls)}")
 
-    cs_prompt = cybersec_prompt(company, algo, year_range, desc, combined_urls)
-    pr_prompt = privacy_prompt(company, algo, year_range, desc, combined_urls)
+    wayback_metadata = wayback_check_urls_cdx(combined_urls, year_range)
+    valid_count = sum(1 for v in wayback_metadata.values() if v.get("valid"))
+    invalid_count = len(wayback_metadata) - valid_count
+    print(
+        f"[INFO] Wayback CDX check completed. Valid in window: {valid_count}, Outside window/none: {invalid_count}")
 
-    cs_answer = gpt_query(cs_prompt)
-    pr_answer = gpt_query(pr_prompt)
+    cs_prompt = cybersec_prompt(
+        company, algo, year_range, desc, wayback_metadata)  # Pass metadata
+    pr_prompt = privacy_prompt(
+        company, algo, year_range, desc, wayback_metadata)  # Pass metadata
 
-    return jsonify({
+    # GPT calls with try/except
+    cyber_txt, cyber_err = gpt_query(cs_prompt)
+    privacy_txt, privacy_err = gpt_query(pr_prompt)
+
+    resp_body = {
         "company": company,
         "algorithm": algo,
         "year_range": year_range,
-        "cybersecurity": cs_answer,
-        "privacy": pr_answer,
+        "cybersecurity": cyber_txt if cyber_err is None else f"[ERROR] {cyber_err}",
+        "privacy": privacy_txt if privacy_err is None else f"[ERROR] {privacy_err}",
         "searched_urls": {
-            "cybersec": cs_urls, # You can still see which came from which search
+            "cybersec": cs_urls,
             "privacy": pr_urls,
             "combined": combined_urls
         },
-        "timestamp": datetime.utcnow().isoformat()
-    })
+        # { url: { valid: bool, snapshot_year: int|null, error?: str } }
+        "wayback_metadata": wayback_metadata,
+        # Corrected deprecation warning
+        "timestamp": datetime.now(UTC).isoformat()
+    }
+
+    status = 200 if (cyber_err is None and privacy_err is None) else 502
+    return jsonify(resp_body), status
 
 
 if __name__ == "__main__":
+    # In production, serve with a production WSGI server and disable debug
     app.run(host="0.0.0.0", port=5000, debug=True)
